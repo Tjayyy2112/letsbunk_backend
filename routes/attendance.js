@@ -304,7 +304,7 @@ router.delete('/day', async (req, res) => {
 
 // POST mark whole day
 router.post('/day', async (req, res) => {
-  const { date, status, fillFromTimetable } = req.body;
+  const { date, status, fillFromTimetable, reason } = req.body;
   if (!date || !status) return res.status(400).json({ error: 'date and status required' });
 
   const client = await pool.connect();
@@ -374,8 +374,8 @@ router.post('/day', async (req, res) => {
         `INSERT INTO attendance_logs (user_id, subject_id, date, status, reason, period_index)
          VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (user_id, date, period_index)
-         DO UPDATE SET status=$4, updated_at=NOW()`,
-        [req.user_id, t.subjectId, date, status, '', t.periodIndex]
+         DO UPDATE SET status=$4, reason=$5, updated_at=NOW()`,
+        [req.user_id, t.subjectId, date, status, reason || '', t.periodIndex]
       );
     }
 
