@@ -8,12 +8,12 @@ router.get('/', async (req, res) => {
   try {
     const { date, subjectId } = req.query;
     let q = `SELECT al.id, al.subject_id AS "subjectId", TO_CHAR(al.date, 'YYYY-MM-DD') AS date, al.status, al.reason, al.period_index, al.created_at
-             FROM attendance_logs al`;
-    const params = [];
-    const wheres = [];
-    if (date)      { params.push(date);      wheres.push(`al.date=$${params.length}`); }
-    if (subjectId) { params.push(subjectId); wheres.push(`al.subject_id=$${params.length}`); }
-    if (wheres.length) q += ' WHERE ' + wheres.join(' AND ');
+             FROM attendance_logs al
+             JOIN subjects s ON s.id = al.subject_id
+             WHERE al.user_id = $1`;
+    const params = [req.user_id];
+    if (date)      { params.push(date);      q += ` AND al.date=$${params.length}`; }
+    if (subjectId) { params.push(subjectId); q += ` AND al.subject_id=$${params.length}`; }
     q += ' ORDER BY al.date DESC, al.period_index ASC, al.created_at DESC';
     const { rows } = await pool.query(q, params);
     res.json(rows);
@@ -33,22 +33,26 @@ router.post('/', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // Verify subject belongs to user
+    const subCheck = await client.query('SELECT id FROM subjects WHERE id=$1 AND user_id=$2', [subjectId, req.user_id]);
+    if (!subCheck.rows.length) throw new Error('Subject not found or unauthorized');
+
     // If adding a new class to a specific period, shift existing periods up
     if (isNewClass) {
       await client.query(
-        `UPDATE attendance_logs SET period_index = -period_index WHERE date=$1 AND period_index >= $2`,
-        [date, periodIndex]
+        `UPDATE attendance_logs SET period_index = -period_index WHERE user_id=$1 AND date=$2 AND period_index >= $3`,
+        [req.user_id, date, periodIndex]
       );
       await client.query(
-        `UPDATE attendance_logs SET period_index = -period_index + 1 WHERE date=$1 AND period_index <= $2`,
-        [date, -periodIndex]
+        `UPDATE attendance_logs SET period_index = -period_index + 1 WHERE user_id=$1 AND date=$2 AND period_index <= $3`,
+        [req.user_id, date, -periodIndex]
       );
     }
 
     // Check existing log for this date+periodIndex
     const existing = await client.query(
-      `SELECT status, subject_id FROM attendance_logs WHERE date=$1 AND period_index=$2`,
-      [date, periodIndex]
+      `SELECT status, subject_id FROM attendance_logs WHERE user_id=$1 AND date=$2 AND period_index=$3`,
+      [req.user_id, date, periodIndex]
     );
     const oldStatus = existing.rows[0]?.status || null;
     const oldSubjectId = existing.rows[0]?.subject_id || null;
@@ -82,8 +86,8 @@ router.post('/', async (req, res) => {
 
       if (setClausesOld) {
         await client.query(
-          `UPDATE subjects SET ${setClausesOld}, updated_at=NOW() WHERE id=$1`,
-          [oldSubjectId, ...Object.values(changesOld).filter(v => v !== 0)]
+          `UPDATE subjects SET ${setClausesOld}, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+          [oldSubjectId, req.user_id, ...Object.values(changesOld).filter(v => v !== 0)]
         );
       }
 
@@ -99,8 +103,8 @@ router.post('/', async (req, res) => {
 
       if (setClausesNew) {
         await client.query(
-          `UPDATE subjects SET ${setClausesNew}, updated_at=NOW() WHERE id=$1`,
-          [subjectId, ...Object.values(changesNew).filter(v => v !== 0)]
+          `UPDATE subjects SET ${setClausesNew}, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+          [subjectId, req.user_id, ...Object.values(changesNew).filter(v => v !== 0)]
         );
       }
     } else {
@@ -122,32 +126,32 @@ router.post('/', async (req, res) => {
 
       if (setClauses) {
         await client.query(
-          `UPDATE subjects SET ${setClauses}, updated_at=NOW() WHERE id=$1`,
-          [subjectId, ...Object.values(changes).filter(v => v !== 0)]
+          `UPDATE subjects SET ${setClauses}, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+          [subjectId, req.user_id, ...Object.values(changes).filter(v => v !== 0)]
         );
       }
     }
 
     // Upsert log
     const { rows } = await client.query(
-      `INSERT INTO attendance_logs (subject_id, date, status, reason, period_index)
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (date, period_index)
-       DO UPDATE SET subject_id=$1, status=$3, reason=$4, updated_at=NOW()
+      `INSERT INTO attendance_logs (user_id, subject_id, date, status, reason, period_index)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (user_id, date, period_index)
+       DO UPDATE SET subject_id=$2, status=$4, reason=$5, updated_at=NOW()
        RETURNING id, subject_id AS "subjectId", TO_CHAR(date, 'YYYY-MM-DD') AS date, status, reason, period_index, created_at`,
-      [subjectId, date, status, reason || '', periodIndex]
+      [req.user_id, subjectId, date, status, reason || '', periodIndex]
     );
 
     const subRes = await client.query(
       `SELECT id, name, faculty, color, icon, target,
               attended, absent, od, off_count AS "off", total
-       FROM subjects WHERE id=$1`,
-      [subjectId]
+       FROM subjects WHERE id=$1 AND user_id=$2`,
+      [subjectId, req.user_id]
     );
 
     let oldSubRes = null;
     if (oldSubjectId && oldSubjectId !== subjectId) {
-      const os = await client.query(`SELECT id, name, attended, absent, od, off_count AS "off", total FROM subjects WHERE id=$1`, [oldSubjectId]);
+      const os = await client.query(`SELECT id, name, attended, absent, od, off_count AS "off", total FROM subjects WHERE id=$1 AND user_id=$2`, [oldSubjectId, req.user_id]);
       oldSubRes = os.rows[0];
     }
 
@@ -172,25 +176,25 @@ router.delete('/', async (req, res) => {
     await client.query('BEGIN');
 
     const existing = await client.query(
-      `SELECT subject_id, status FROM attendance_logs WHERE date=$1 AND period_index=$2`,
-      [date, periodIndex]
+      `SELECT subject_id, status FROM attendance_logs WHERE user_id=$1 AND date=$2 AND period_index=$3`,
+      [req.user_id, date, periodIndex]
     );
     if (!existing.rows.length) { await client.query('COMMIT'); return res.json({ ok: true }); }
 
     const { status, subject_id } = existing.rows[0];
     await client.query(
-      `DELETE FROM attendance_logs WHERE date=$1 AND period_index=$2`,
-      [date, periodIndex]
+      `DELETE FROM attendance_logs WHERE user_id=$1 AND date=$2 AND period_index=$3`,
+      [req.user_id, date, periodIndex]
     );
 
     // Shift periods back down
     await client.query(
-      `UPDATE attendance_logs SET period_index = -period_index WHERE date=$1 AND period_index > $2`,
-      [date, periodIndex]
+      `UPDATE attendance_logs SET period_index = -period_index WHERE user_id=$1 AND date=$2 AND period_index > $3`,
+      [req.user_id, date, periodIndex]
     );
     await client.query(
-      `UPDATE attendance_logs SET period_index = -period_index - 1 WHERE date=$1 AND period_index < $2`,
-      [date, -periodIndex]
+      `UPDATE attendance_logs SET period_index = -period_index - 1 WHERE user_id=$1 AND date=$2 AND period_index < $3`,
+      [req.user_id, date, -periodIndex]
     );
 
     // Rollback counters
@@ -199,15 +203,15 @@ router.delete('/', async (req, res) => {
     await client.query(
       `UPDATE subjects SET ${col}=GREATEST(0,${col}-1),
        total=GREATEST(0, total - $1), updated_at=NOW()
-       WHERE id=$2`,
-      [status !== 'OFF' ? 1 : 0, subject_id]
+       WHERE id=$2 AND user_id=$3`,
+      [status !== 'OFF' ? 1 : 0, subject_id, req.user_id]
     );
 
     const subRes = await client.query(
       `SELECT id, name, faculty, color, icon, target,
               attended, absent, od, off_count AS "off", total
-       FROM subjects WHERE id=$1`,
-      [subject_id]
+       FROM subjects WHERE id=$1 AND user_id=$2`,
+      [subject_id, req.user_id]
     );
 
     await client.query('COMMIT');
@@ -225,8 +229,8 @@ router.delete('/reset', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('DELETE FROM attendance_logs');
-    await client.query('UPDATE subjects SET attended=0, absent=0, od=0, off_count=0, total=0, updated_at=NOW()');
+    await client.query('DELETE FROM attendance_logs WHERE user_id=$1', [req.user_id]);
+    await client.query('UPDATE subjects SET attended=0, absent=0, od=0, off_count=0, total=0, updated_at=NOW() WHERE user_id=$1', [req.user_id]);
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {
@@ -242,9 +246,9 @@ router.delete('/clear-all', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('DELETE FROM attendance_logs');
-    await client.query('DELETE FROM timetable');
-    await client.query('DELETE FROM subjects');
+    await client.query('DELETE FROM attendance_logs WHERE user_id=$1', [req.user_id]);
+    await client.query('DELETE FROM timetable_entries WHERE user_id=$1', [req.user_id]);
+    await client.query('DELETE FROM subjects WHERE user_id=$1', [req.user_id]);
     await client.query('COMMIT');
     res.json({ ok: true });
   } catch (err) {

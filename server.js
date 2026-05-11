@@ -2,10 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import pool from './db/index.js';
-import subjectsRouter    from './routes/subjects.js';
-import attendanceRouter  from './routes/attendance.js';
-import timetableRouter   from './routes/timetable.js';
-import settingsRouter    from './routes/settings.js';
+import { authMiddleware } from './middleware/auth.js';
+import authRouter          from './routes/auth.js';
+import subjectsRouter      from './routes/subjects.js';
+import attendanceRouter    from './routes/attendance.js';
+import timetableRouter     from './routes/timetable.js';
+import settingsRouter      from './routes/settings.js';
 
 dotenv.config();
 
@@ -28,10 +30,14 @@ app.get('/', async (req, res) => {
   }
 });
 
-app.use('/api/subjects',   subjectsRouter);
-app.use('/api/attendance', attendanceRouter);
-app.use('/api/timetable',  timetableRouter);
-app.use('/api/settings',   settingsRouter);
+// Auth Routes (unprotected)
+app.use('/api/auth', authRouter);
+
+// Protected API Routes
+app.use('/api/subjects',   authMiddleware, subjectsRouter);
+app.use('/api/attendance', authMiddleware, attendanceRouter);
+app.use('/api/timetable',  authMiddleware, timetableRouter);
+app.use('/api/settings',   authMiddleware, settingsRouter);
 
 // Global error handler
 app.use((err, req, res, next) => {

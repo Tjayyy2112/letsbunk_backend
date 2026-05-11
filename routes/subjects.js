@@ -9,7 +9,10 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT id, name, faculty, color, icon, target,
               attended, absent, od, off_count AS "off", total
-       FROM subjects ORDER BY created_at ASC`
+       FROM subjects 
+       WHERE user_id = $1 AND deleted_at IS NULL
+       ORDER BY created_at ASC`,
+      [req.user_id]
     );
     res.json(rows);
   } catch (err) {
@@ -22,17 +25,17 @@ router.post('/', async (req, res) => {
   const { name, faculty, color, icon, target, attended = 0, absent = 0, od = 0, off = 0 } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Subject name required' });
   try {
-    // Prevent duplicate names
-    const dup = await pool.query('SELECT id FROM subjects WHERE LOWER(name)=LOWER($1)', [name.trim()]);
+    // Prevent duplicate names per user
+    const dup = await pool.query('SELECT id FROM subjects WHERE LOWER(name)=LOWER($1) AND user_id=$2 AND deleted_at IS NULL', [name.trim(), req.user_id]);
     if (dup.rows.length) return res.status(409).json({ error: 'Subject already exists' });
 
     const total = parseInt(attended) + parseInt(absent) + parseInt(od);
     const { rows } = await pool.query(
-      `INSERT INTO subjects (name, faculty, color, icon, target, attended, absent, od, off_count, total)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `INSERT INTO subjects (user_id, name, faculty, color, icon, target, attended, absent, od, off_count, total)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
        RETURNING id, name, faculty, color, icon, target,
                  attended, absent, od, off_count AS "off", total`,
-      [name.trim(), faculty || '', color || '#8ED8CC', icon || '📚', target || 75, attended, absent, od, off, total]
+      [req.user_id, name.trim(), faculty || '', color || '#8ED8CC', icon || '📚', target || 75, attended, absent, od, off, total]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -45,7 +48,6 @@ router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const { name, faculty, color, icon, target, attended, absent, od, off } = req.body;
   try {
-    // We update total = attended + absent + od. If counters are undefined, we keep existing values.
     const { rows } = await pool.query(
       `UPDATE subjects
        SET name=$1, faculty=$2, color=$3, icon=$4, target=$5, 
@@ -55,10 +57,10 @@ router.put('/:id', async (req, res) => {
            off_count=COALESCE($10, off_count),
            total=(COALESCE($7, attended) + COALESCE($8, absent) + COALESCE($9, od)),
            updated_at=NOW()
-       WHERE id=$6
+       WHERE id=$6 AND user_id=$11
        RETURNING id, name, faculty, color, icon, target,
                  attended, absent, od, off_count AS "off", total`,
-      [name, faculty, color, icon, target, id, attended, absent, od, off]
+      [name, faculty, color, icon, target, id, attended, absent, od, off, req.user_id]
     );
     if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
@@ -74,12 +76,15 @@ router.delete('/:id', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    
+    // Verify subject belongs to user
+    const sub = await client.query('SELECT id FROM subjects WHERE id=$1 AND user_id=$2', [id, req.user_id]);
+    if (!sub.rows.length) throw new Error('Not found');
+
     if (!safe) {
-      // Hard delete: cascade deletes logs + timetable via FK
       await client.query('DELETE FROM subjects WHERE id=$1', [id]);
     } else {
-      // Safe delete: remove logs + timetable but keep subject row as "archived"
-      await client.query('DELETE FROM timetable_entries WHERE subject_id=$1', [id]);
+      await client.query('DELETE FROM timetable_entries WHERE subject_id=$1 AND user_id=$2', [id, req.user_id]);
       await client.query(
         `ALTER TABLE subjects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`
       );
