@@ -4,10 +4,12 @@ dotenv.config();
 
 const { Pool } = pg;
 
+const isExternal = process.env.DATABASE_URL && process.env.DATABASE_URL.includes('.render.com');
+
 const poolConfig = process.env.DATABASE_URL 
   ? { 
       connectionString: process.env.DATABASE_URL, 
-      ssl: { rejectUnauthorized: false } 
+      ssl: isExternal ? { rejectUnauthorized: false } : false 
     }
   : {
       user: process.env.DB_USER || 'postgres',
