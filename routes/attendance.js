@@ -304,7 +304,7 @@ router.delete('/day', async (req, res) => {
 
 // POST mark whole day
 router.post('/day', async (req, res) => {
-  const { date, status, fillFromTimetable, reason } = req.body;
+  const { date, status, reason } = req.body;
   if (!date || !status) return res.status(400).json({ error: 'date and status required' });
 
   const client = await pool.connect();
@@ -320,23 +320,21 @@ router.post('/day', async (req, res) => {
     let targets = [];
     if (existing.rows.length > 0) {
       targets = existing.rows.map(r => ({ subjectId: r.subject_id, periodIndex: r.period_index, oldStatus: r.status }));
-    } else if (fillFromTimetable) {
-      // Fetch from timetable (useful for Today screen)
+    } else {
+      // Fetch from timetable
       const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(date).getDay()];
       const tt = await client.query(
         `SELECT subject_id, time FROM timetable_entries WHERE user_id=$1 AND day=$2 ORDER BY time`,
         [req.user_id, dayName]
       );
       targets = tt.rows.map((r, i) => ({ subjectId: r.subject_id, periodIndex: i + 1, oldStatus: null }));
-    } else {
-      await client.query('COMMIT');
-      return res.status(404).json({ error: 'No classes found for this date. Please mark at least one class manually first.' });
     }
 
     if (targets.length === 0) {
       await client.query('COMMIT');
-      return res.json({ ok: true, message: 'No classes to mark' });
+      return res.status(404).json({ error: 'No classes found for this date in your timetable or logs.' });
     }
+
 
     const delta = (s, sign) => {
       if (!s) return {};
