@@ -324,10 +324,10 @@ router.post('/day', async (req, res) => {
       // Fetch from timetable
       const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(date).getDay()];
       const tt = await client.query(
-        `SELECT subject_id, period_index FROM timetable_entries WHERE user_id=$1 AND day=$2`,
+        `SELECT subject_id, time FROM timetable_entries WHERE user_id=$1 AND day=$2 ORDER BY time`,
         [req.user_id, dayName]
       );
-      targets = tt.rows.map(r => ({ subjectId: r.subject_id, periodIndex: r.period_index, oldStatus: null }));
+      targets = tt.rows.map((r, i) => ({ subjectId: r.subject_id, periodIndex: i + 1, oldStatus: null }));
     }
 
     if (targets.length === 0) {
