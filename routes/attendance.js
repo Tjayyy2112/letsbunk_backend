@@ -81,7 +81,7 @@ router.post('/', async (req, res) => {
 
       const setClausesOld = Object.entries(changesOld)
         .filter(([, v]) => v !== 0)
-        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 2})`)
+        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 3})`)
         .join(', ');
 
       if (setClausesOld) {
@@ -98,7 +98,7 @@ router.post('/', async (req, res) => {
 
       const setClausesNew = Object.entries(changesNew)
         .filter(([, v]) => v !== 0)
-        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 2})`)
+        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 3})`)
         .join(', ');
 
       if (setClausesNew) {
@@ -121,7 +121,7 @@ router.post('/', async (req, res) => {
 
       const setClauses = Object.entries(changes)
         .filter(([, v]) => v !== 0)
-        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 2})`)
+        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 3})`)
         .join(', ');
 
       if (setClauses) {
@@ -160,6 +160,7 @@ router.post('/', async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
+    import('fs').then(fs => fs.appendFileSync('error.log', err.stack + '\\n'));
     res.status(500).json({ error: err.message });
   } finally {
     client.release();
