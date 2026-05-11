@@ -260,4 +260,131 @@ router.delete('/clear-all', async (req, res) => {
   }
 });
 
+// DELETE clear all logs for a date
+router.delete('/day', async (req, res) => {
+  const { date } = req.query;
+  if (!date) return res.status(400).json({ error: 'date required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const logs = await client.query(
+      `SELECT subject_id, status FROM attendance_logs WHERE user_id=$1 AND date=$2`,
+      [req.user_id, date]
+    );
+
+    for (const log of logs.rows) {
+      const colMap = { PRESENT: 'attended', ABSENT: 'absent', OD: 'od', OFF: 'off_count' };
+      const col = colMap[log.status];
+      if (col) {
+        await client.query(
+          `UPDATE subjects SET ${col}=GREATEST(0,${col}-1),
+           total=GREATEST(0, total - $1), updated_at=NOW()
+           WHERE id=$2 AND user_id=$3`,
+          [log.status !== 'OFF' ? 1 : 0, log.subject_id, req.user_id]
+        );
+      }
+    }
+
+    await client.query(
+      `DELETE FROM attendance_logs WHERE user_id=$1 AND date=$2`,
+      [req.user_id, date]
+    );
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST mark whole day
+router.post('/day', async (req, res) => {
+  const { date, status } = req.body;
+  if (!date || !status) return res.status(400).json({ error: 'date and status required' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Find existing logs
+    const existing = await client.query(
+      `SELECT subject_id, period_index, status FROM attendance_logs WHERE user_id=$1 AND date=$2`,
+      [req.user_id, date]
+    );
+
+    let targets = [];
+    if (existing.rows.length > 0) {
+      targets = existing.rows.map(r => ({ subjectId: r.subject_id, periodIndex: r.period_index, oldStatus: r.status }));
+    } else {
+      // Fetch from timetable
+      const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(date).getDay()];
+      const tt = await client.query(
+        `SELECT subject_id, period_index FROM timetable_entries WHERE user_id=$1 AND day=$2`,
+        [req.user_id, dayName]
+      );
+      targets = tt.rows.map(r => ({ subjectId: r.subject_id, periodIndex: r.period_index, oldStatus: null }));
+    }
+
+    if (targets.length === 0) {
+      await client.query('COMMIT');
+      return res.json({ ok: true, message: 'No classes to mark' });
+    }
+
+    const delta = (s, sign) => {
+      if (!s) return {};
+      const map = { PRESENT: { attended: sign }, ABSENT: { absent: sign }, OD: { od: sign }, OFF: { off_count: sign } };
+      return map[s] || {};
+    };
+
+    for (const t of targets) {
+      const rollback = delta(t.oldStatus, -1);
+      const apply    = delta(status, +1);
+
+      const changes = {};
+      for (const [k, v] of Object.entries(rollback)) changes[k] = (changes[k] || 0) + v;
+      for (const [k, v] of Object.entries(apply))    changes[k] = (changes[k] || 0) + v;
+
+      const oldAffectsTotal = t.oldStatus && t.oldStatus !== 'OFF';
+      const newAffectsTotal = status !== 'OFF';
+      if (!t.oldStatus && newAffectsTotal)          changes.total = 1;
+      if (t.oldStatus && oldAffectsTotal && !newAffectsTotal) changes.total = -1;
+      if (t.oldStatus && !oldAffectsTotal && newAffectsTotal) changes.total = 1;
+
+      const setClauses = Object.entries(changes)
+        .filter(([, v]) => v !== 0)
+        .map(([col], i) => `${col} = GREATEST(0, ${col} + $${i + 3})`)
+        .join(', ');
+
+      if (setClauses) {
+        await client.query(
+          `UPDATE subjects SET ${setClauses}, updated_at=NOW() WHERE id=$1 AND user_id=$2`,
+          [t.subjectId, req.user_id, ...Object.values(changes).filter(v => v !== 0)]
+        );
+      }
+
+      await client.query(
+        `INSERT INTO attendance_logs (user_id, subject_id, date, status, reason, period_index)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (user_id, date, period_index)
+         DO UPDATE SET status=$4, updated_at=NOW()`,
+        [req.user_id, t.subjectId, date, status, '', t.periodIndex]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 export default router;
+
