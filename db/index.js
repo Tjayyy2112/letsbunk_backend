@@ -1,33 +1,18 @@
-import pg from 'pg';
+import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const { Pool } = pg;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/letsbunk';
 
-const isExternal = process.env.DATABASE_URL && process.env.DATABASE_URL.includes('.render.com');
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ Connected to MongoDB'))
+  .catch((err) => {
+    console.error('❌ MongoDB connection error:', err);
+    process.exit(1);
+  });
 
-const poolConfig = process.env.DATABASE_URL 
-  ? { 
-      connectionString: process.env.DATABASE_URL, 
-      ssl: isExternal ? { rejectUnauthorized: false } : false 
-    }
-  : {
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || 'postgres123',
-      host: process.env.DB_HOST || 'localhost',
-      port: process.env.DB_PORT || 5432,
-      database: process.env.DB_NAME || 'letsbunk',
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-    };
-
-const pool = new Pool(poolConfig);
-
-pool.on('error', (err) => {
-  console.error('PostgreSQL pool error:', err);
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
 });
 
-pool.on('connect', () => {
-  console.log('✅ Connected to PostgreSQL');
-});
-
-export default pool;
+export default mongoose;

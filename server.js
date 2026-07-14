@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import pool from './db/index.js';
+import mongoose from './db/index.js';
 import { authMiddleware } from './middleware/auth.js';
 import authRouter          from './routes/auth.js';
 import subjectsRouter      from './routes/subjects.js';
@@ -23,8 +23,8 @@ app.get('/health', (_, res) => res.json({ status: 'ok', timestamp: new Date() })
 // DB Connection Test
 app.get('/', async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ message: 'Database connected!', time: result.rows[0] });
+    const state = mongoose.connection.readyState; // 1 = connected
+    res.json({ message: state === 1 ? 'Database connected!' : 'Database not connected', time: new Date() });
   } catch (err) {
     res.status(500).json({ error: 'Database connection failed', details: err.message });
   }
