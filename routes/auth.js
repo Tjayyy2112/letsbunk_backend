@@ -1,6 +1,7 @@
 import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import nodemailer from 'nodemailer';
 import User from '../db/models/User.js';
 import Settings from '../db/models/Settings.js';
 import { authMiddleware } from '../middleware/auth.js';
@@ -12,12 +13,23 @@ const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
 };
 
+// nodemailer Transporter
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || '',
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: {
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+  },
+});
+
 // Register
 router.post('/register', async (req, res) => {
-  const { email, password, name, recoveryKey } = req.body;
+  const { email, password, name } = req.body;
 
-  if (!email || !password || !recoveryKey) {
-    return res.status(400).json({ error: 'Email, password, and recovery key are required' });
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
   }
 
   try {
@@ -26,18 +38,13 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    // Hash password
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(password, salt);
-
-    // Hash recovery key
-    const recoveryHash = await bcrypt.hash(recoveryKey, salt);
 
     const user = await User.create({
       email: email.toLowerCase(),
       password_hash: hash,
-      name: name || '',
-      recovery_key_hash: recoveryHash
+      name: name || ''
     });
 
     await Settings.create({ user_id: user._id, target_attendance: 75, notifications: true });
@@ -77,38 +84,105 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Forgot Password (Reset)
-router.post('/forgot-password', async (req, res) => {
-  const { email, recoveryKey, newPassword } = req.body;
+// Send OTP
+router.post('/send-otp', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
 
-  if (!email || !recoveryKey || !newPassword) {
-    return res.status(400).json({ error: 'Email, recovery key, and new password are required' });
+  try {
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    user.reset_otp = otp;
+    user.reset_otp_expires = expires;
+    user.reset_otp_attempts = 0;
+    await user.save();
+
+    const smtpConfigured = process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS;
+
+    if (smtpConfigured) {
+      const mailOptions = {
+        from: process.env.SMTP_FROM || `"Let'sBunk" <noreply@letsbunk.app>`,
+        to: user.email,
+        subject: "Let'sBunk Password Reset Code",
+        text: `Your password reset code is ${otp}. It will expire in 10 minutes.`,
+        html: `<div style="font-family: sans-serif; padding: 20px; background: #07110F; color: #FFFFFF; border-radius: 12px; max-width: 480px;">
+                 <h2 style="color: #8ED8CC;">Let'sBunk Password Reset</h2>
+                 <p>You requested to reset your password. Use the following 6-digit verification code:</p>
+                 <div style="font-size: 28px; font-weight: bold; background: rgba(142,216,204,0.1); border: 1px dashed #8ED8CC; color: #8ED8CC; padding: 12px; border-radius: 8px; text-align: center; margin: 20px 0; letter-spacing: 4px;">
+                   ${otp}
+                 </div>
+                 <p style="font-size: 12px; color: #a0a0a0;">This code will expire in 10 minutes. If you did not request this, you can safely ignore this email.</p>
+               </div>`
+      };
+      await transporter.sendMail(mailOptions);
+      res.json({ ok: true, message: 'OTP sent successfully to your email.' });
+    } else {
+      // Developer fallback logging OTP to console
+      console.log(`\n==========================================`);
+      console.log(`[DEVELOPER FALLBACK] SMTP is not configured in .env.`);
+      console.log(`OTP Code for ${user.email}: ${otp}`);
+      console.log(`==========================================\n`);
+      res.json({ ok: true, message: 'SMTP not configured. OTP printed to server console logs.' });
+    }
+  } catch (err) {
+    console.error('Send OTP error:', err);
+    res.status(500).json({ error: 'Failed to send OTP. Please check server logs.' });
+  }
+});
+
+// Reset Password (Verify OTP and save new password)
+router.post('/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({ error: 'Email, OTP, and new password are required' });
   }
 
   try {
     const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (!user.reset_otp || !user.reset_otp_expires) {
+      return res.status(400).json({ error: 'No active password reset request found. Please request a new code.' });
     }
 
-    if (!user.recovery_key_hash) {
-      return res.status(400).json({ error: 'Recovery key not configured for this user. Please set it in settings.' });
+    if (new Date() > user.reset_otp_expires) {
+      user.reset_otp = null;
+      user.reset_otp_expires = null;
+      await user.save();
+      return res.status(400).json({ error: 'OTP code has expired. Please request a new code.' });
     }
 
-    const isMatch = await bcrypt.compare(recoveryKey, user.recovery_key_hash);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid recovery key' });
+    if (user.reset_otp_attempts >= 3) {
+      user.reset_otp = null;
+      user.reset_otp_expires = null;
+      await user.save();
+      return res.status(400).json({ error: 'Too many incorrect attempts. Please request a new code.' });
+    }
+
+    if (user.reset_otp !== otp.trim()) {
+      user.reset_otp_attempts += 1;
+      await user.save();
+      return res.status(401).json({ error: `Invalid OTP code. Attempts remaining: ${3 - user.reset_otp_attempts}` });
     }
 
     const salt = await bcrypt.genSalt(10);
     const hash = await bcrypt.hash(newPassword, salt);
 
     user.password_hash = hash;
+    user.reset_otp = null;
+    user.reset_otp_expires = null;
+    user.reset_otp_attempts = 0;
     await user.save();
 
-    res.json({ ok: true, message: 'Password reset successfully' });
+    res.json({ ok: true, message: 'Password reset successfully!' });
   } catch (err) {
-    console.error('Forgot password error:', err);
+    console.error('Reset password error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -141,38 +215,6 @@ router.put('/change-password', authMiddleware, async (req, res) => {
     res.json({ ok: true, message: 'Password changed successfully' });
   } catch (err) {
     console.error('Change password error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Change Recovery Key (from Settings)
-router.put('/change-recovery-key', authMiddleware, async (req, res) => {
-  const { currentPassword, recoveryKey } = req.body;
-
-  if (!currentPassword || !recoveryKey) {
-    return res.status(400).json({ error: 'Current password and new recovery key are required' });
-  }
-
-  try {
-    const user = await User.findById(req.user_id);
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Incorrect password' });
-    }
-
-    const salt = await bcrypt.genSalt(10);
-    const recoveryHash = await bcrypt.hash(recoveryKey, salt);
-
-    user.recovery_key_hash = recoveryHash;
-    await user.save();
-
-    res.json({ ok: true, message: 'Recovery key updated successfully' });
-  } catch (err) {
-    console.error('Change recovery key error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
