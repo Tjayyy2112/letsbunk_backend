@@ -111,6 +111,8 @@ router.post('/send-otp', async (req, res) => {
     user.reset_otp_attempts = 0;
     await user.save();
 
+    const appsScriptUrl = process.env.APPS_SCRIPT_URL;
+    const appsScriptSecret = process.env.APPS_SCRIPT_SECRET || 'LetsBunkSecret123';
     const resendApiKey = process.env.RESEND_API_KEY;
     const sendgridApiKey = process.env.SENDGRID_API_KEY;
     const brevoApiKey = process.env.BREVO_API_KEY;
@@ -130,7 +132,25 @@ router.post('/send-otp', async (req, res) => {
     const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "noreply@letsbunk.app";
     const fromName = process.env.SMTP_FROM_NAME || "Let'sBunk";
 
-    if (brevoApiKey) {
+    if (appsScriptUrl) {
+      // Use Google Apps Script (100% Free, sends from your Gmail, never blocked by Render!)
+      const response = await fetch(appsScriptUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: appsScriptSecret,
+          to: user.email,
+          subject: emailSubject,
+          html: emailHtml
+        })
+      });
+
+      const resData = await response.json();
+      if (!response.ok || resData.error) {
+        throw new Error(resData.error || 'Google Apps Script returned an error');
+      }
+      res.json({ ok: true, message: 'OTP sent successfully to your email.' });
+    } else if (brevoApiKey) {
       // Use Brevo HTTP API (Free 300 emails/day to ANY recipient without domain verification!)
       const response = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
