@@ -13,16 +13,25 @@ const generateToken = (userId) => {
   return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
 };
 
-// nodemailer Transporter
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || '',
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: process.env.SMTP_SECURE === 'true',
+// nodemailer Transporter config
+const transporterConfig = {
   auth: {
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || '',
   },
-});
+  connectionTimeout: 10000, // 10 seconds connection timeout
+  socketTimeout: 10000,     // 10 seconds socket timeout
+};
+
+if (process.env.SMTP_HOST === 'smtp.gmail.com') {
+  transporterConfig.service = 'gmail';
+} else {
+  transporterConfig.host = process.env.SMTP_HOST || '';
+  transporterConfig.port = parseInt(process.env.SMTP_PORT || '587');
+  transporterConfig.secure = process.env.SMTP_SECURE === 'true';
+}
+
+const transporter = nodemailer.createTransport(transporterConfig);
 
 // Register
 router.post('/register', async (req, res) => {
