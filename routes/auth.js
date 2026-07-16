@@ -112,6 +112,8 @@ router.post('/send-otp', async (req, res) => {
     await user.save();
 
     const resendApiKey = process.env.RESEND_API_KEY;
+    const sendgridApiKey = process.env.SENDGRID_API_KEY;
+    const brevoApiKey = process.env.BREVO_API_KEY;
     const smtpConfigured = process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS;
 
     const emailSubject = "Let'sBunk Password Reset Code";
@@ -125,8 +127,56 @@ router.post('/send-otp', async (req, res) => {
                </div>`;
     const emailText = `Your password reset code is ${otp}. It will expire in 10 minutes.`;
 
-    if (resendApiKey) {
-      // Use Resend HTTP API (Works flawlessly on Render Free tier!)
+    const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "noreply@letsbunk.app";
+    const fromName = process.env.SMTP_FROM_NAME || "Let'sBunk";
+
+    if (brevoApiKey) {
+      // Use Brevo HTTP API (Free 300 emails/day to ANY recipient without domain verification!)
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-key': brevoApiKey
+        },
+        body: JSON.stringify({
+          sender: { name: fromName, email: fromEmail },
+          to: [{ email: user.email }],
+          subject: emailSubject,
+          htmlContent: emailHtml
+        })
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.message || 'Brevo API returned an error');
+      }
+      res.json({ ok: true, message: 'OTP sent successfully to your email.' });
+    } else if (sendgridApiKey) {
+      // Use SendGrid HTTP API (Free 100 emails/day to ANY recipient using a Single Sender verified Gmail!)
+      const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${sendgridApiKey}`
+        },
+        body: JSON.stringify({
+          personalizations: [{ to: [{ email: user.email }] }],
+          from: { email: fromEmail, name: fromName },
+          subject: emailSubject,
+          content: [
+            { type: 'text/plain', value: emailText },
+            { type: 'text/html', value: emailHtml }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        const resText = await response.text();
+        throw new Error(resText || 'SendGrid API returned an error');
+      }
+      res.json({ ok: true, message: 'OTP sent successfully to your email.' });
+    } else if (resendApiKey) {
+      // Use Resend HTTP API
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
         headers: {
@@ -134,7 +184,7 @@ router.post('/send-otp', async (req, res) => {
           'Authorization': `Bearer ${resendApiKey}`
         },
         body: JSON.stringify({
-          from: process.env.SMTP_FROM || "Let'sBunk <onboarding@resend.dev>",
+          from: process.env.SMTP_FROM || `${fromName} <onboarding@resend.dev>`,
           to: user.email,
           subject: emailSubject,
           text: emailText,
@@ -148,9 +198,9 @@ router.post('/send-otp', async (req, res) => {
       }
       res.json({ ok: true, message: 'OTP sent successfully to your email.' });
     } else if (smtpConfigured) {
-      // Use traditional SMTP (fails on Render Free tier, but works on paid tier or other hosts)
+      // Use traditional SMTP
       const mailOptions = {
-        from: process.env.SMTP_FROM || `"Let'sBunk" <noreply@letsbunk.app>`,
+        from: process.env.SMTP_FROM || `"${fromName}" <${fromEmail}>`,
         to: user.email,
         subject: emailSubject,
         text: emailText,
@@ -161,10 +211,10 @@ router.post('/send-otp', async (req, res) => {
     } else {
       // Developer fallback logging OTP to console
       console.log(`\n==========================================`);
-      console.log(`[DEVELOPER FALLBACK] Neither SMTP nor Resend API is configured.`);
+      console.log(`[DEVELOPER FALLBACK] No email API or SMTP configured.`);
       console.log(`OTP Code for ${user.email}: ${otp}`);
       console.log(`==========================================\n`);
-      res.json({ ok: true, message: 'SMTP/Resend not configured. OTP printed to server console logs.' });
+      res.json({ ok: true, message: 'SMTP/API not configured. OTP printed to server console logs.' });
     }
   } catch (err) {
     console.error('Send OTP error:', err);
