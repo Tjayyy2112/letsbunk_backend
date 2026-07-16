@@ -111,32 +111,60 @@ router.post('/send-otp', async (req, res) => {
     user.reset_otp_attempts = 0;
     await user.save();
 
+    const resendApiKey = process.env.RESEND_API_KEY;
     const smtpConfigured = process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS;
 
-    if (smtpConfigured) {
-      const mailOptions = {
-        from: process.env.SMTP_FROM || `"Let'sBunk" <noreply@letsbunk.app>`,
-        to: user.email,
-        subject: "Let'sBunk Password Reset Code",
-        text: `Your password reset code is ${otp}. It will expire in 10 minutes.`,
-        html: `<div style="font-family: sans-serif; padding: 20px; background: #07110F; color: #FFFFFF; border-radius: 12px; max-width: 480px;">
+    const emailSubject = "Let'sBunk Password Reset Code";
+    const emailHtml = `<div style="font-family: sans-serif; padding: 20px; background: #07110F; color: #FFFFFF; border-radius: 12px; max-width: 480px;">
                  <h2 style="color: #8ED8CC;">Let'sBunk Password Reset</h2>
                  <p>You requested to reset your password. Use the following 6-digit verification code:</p>
                  <div style="font-size: 28px; font-weight: bold; background: rgba(142,216,204,0.1); border: 1px dashed #8ED8CC; color: #8ED8CC; padding: 12px; border-radius: 8px; text-align: center; margin: 20px 0; letter-spacing: 4px;">
                    ${otp}
                  </div>
                  <p style="font-size: 12px; color: #a0a0a0;">This code will expire in 10 minutes. If you did not request this, you can safely ignore this email.</p>
-               </div>`
+               </div>`;
+    const emailText = `Your password reset code is ${otp}. It will expire in 10 minutes.`;
+
+    if (resendApiKey) {
+      // Use Resend HTTP API (Works flawlessly on Render Free tier!)
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${resendApiKey}`
+        },
+        body: JSON.stringify({
+          from: process.env.SMTP_FROM || "Let'sBunk <onboarding@resend.dev>",
+          to: user.email,
+          subject: emailSubject,
+          text: emailText,
+          html: emailHtml
+        })
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.message || 'Resend API returned an error');
+      }
+      res.json({ ok: true, message: 'OTP sent successfully to your email.' });
+    } else if (smtpConfigured) {
+      // Use traditional SMTP (fails on Render Free tier, but works on paid tier or other hosts)
+      const mailOptions = {
+        from: process.env.SMTP_FROM || `"Let'sBunk" <noreply@letsbunk.app>`,
+        to: user.email,
+        subject: emailSubject,
+        text: emailText,
+        html: emailHtml
       };
       await transporter.sendMail(mailOptions);
       res.json({ ok: true, message: 'OTP sent successfully to your email.' });
     } else {
       // Developer fallback logging OTP to console
       console.log(`\n==========================================`);
-      console.log(`[DEVELOPER FALLBACK] SMTP is not configured in .env.`);
+      console.log(`[DEVELOPER FALLBACK] Neither SMTP nor Resend API is configured.`);
       console.log(`OTP Code for ${user.email}: ${otp}`);
       console.log(`==========================================\n`);
-      res.json({ ok: true, message: 'SMTP not configured. OTP printed to server console logs.' });
+      res.json({ ok: true, message: 'SMTP/Resend not configured. OTP printed to server console logs.' });
     }
   } catch (err) {
     console.error('Send OTP error:', err);
